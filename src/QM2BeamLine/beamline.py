@@ -2,9 +2,9 @@ import re
 
 import fabio
 import numpy as np
-from nexusformat.nexus import (NeXusError, NXdata, NXentry, NXfield,
-                               NXgoniometer, NXinstrument, NXlink, NXmonitor,
-                               NXsample, NXsource, NXsubentry, nxopen)
+from nexusformat.nexus import (NeXusError, NXcollection, NXdata, NXfield,
+                               NXgoniometer, NXmonitor, NXsample, NXsource,
+                               nxopen)
 from nexusformat.nexus.tree import natural_sort
 from nxrefine.nxbeamline import NXBeamLine
 from nxrefine.nxutils import SpecParser
@@ -18,7 +18,7 @@ class QM2BeamLine(NXBeamLine):
 
     name = 'QM2'
     source_name = 'Cornell High-Energy Synchrotron'
-    make_scans_enabled = False
+    create_macro_enabled = False
     import_data_enabled = True
 
     def __init__(self, reduce=None, directory=None):
@@ -171,83 +171,70 @@ class QM2BeamLine(NXBeamLine):
                 root['entry/data/data'][i:i+len(files), :, :] = (
                     self.read_images(files, image_shape))
 
-    def read_logs(self):
+    def get_logs(self):
         spec_file = self.raw_directory.parent / self.sample
         if not spec_file.exists():
             self.reduce.log(f"'{spec_file}' does not exist")
             raise NeXusError('SPEC file not found')
+        scan_number = self.entry['scan_number'].nxvalue
+        logs = SpecParser(spec_file).read(scan_number).NXentry[0]
+        # NXcollection is the conventional class at
+        # entry/instrument/logs (NXsubentry connotes an alternative
+        # measurement interpretation, which these logs are not).
+        logs.nxclass = NXcollection
+        # Sweep the pre-migration entry['logs'] path so old QM2
+        # wrappers don't carry duplicate data alongside the new
+        # entry['instrument/logs'].
+        if 'logs' in self.entry:
+            del self.entry['logs']
+        return logs
 
-        with self.reduce:
-            scan_number = self.entry['scan_number'].nxvalue
-            logs = SpecParser(spec_file).read(scan_number).NXentry[0]
-            logs.nxclass = NXsubentry
-            if 'logs' in self.entry:
-                del self.entry['logs']
-            self.entry['logs'] = logs
-            frame_number = self.entry['data/frame_number']
-            frames = frame_number.size
-            if 'date' in logs:
-                self.entry['start_time'] = logs['date']
-                self.entry['data/frame_time'].attrs['start'] = logs['date']
-            if self.monitor in logs['data']:
-                data = logs[f'data/{self.monitor}'][:frames]
-                if 'monitor' in self.entry:
-                    del self.entry['monitor']
-                # Remove outliers at beginning and end of frames
-                data[0:2] = data[2]
-                data[-2:] = data[-3]
-                self.entry['monitor'] = NXmonitor(NXfield(data,
-                                                          name=self.monitor),
-                                                  frame_number)
-                if 'data/frame_time' in self.entry:
-                    self.entry['monitor/frame_time'] = (
-                        self.entry['data/frame_time'])
-            if 'instrument' not in self.entry:
-                self.entry['instrument'] = NXinstrument()
-            if 'source' not in self.entry['instrument']:
-                self.entry['instrument/source'] = NXsource()
-            self.entry['instrument/source/name'] = self.source_name
-            self.entry['instrument/source/type'] = self.source_type
-            self.entry['instrument/source/probe'] = 'x-ray'
-            if 'goniometer' not in self.entry['instrument']:
-                self.entry['instrument/goniometer'] = NXgoniometer()
-            if 'phi' in logs['data']:
-                phi = self.entry['instrument/goniometer/phi'] = (
-                    logs['data/phi'][0])
-                phi.attrs['end'] = logs['data/phi'][-1]
-                phi.attrs['step'] = logs['data/phi'][1] - logs['data/phi'][0]
-            if 'chi' in logs['positioners']:
-                self.entry['instrument/goniometer/chi'] = (
-                    90.0 - logs['positioners/chi'])
-            if 'th' in logs['positioners']:
-                self.entry['instrument/goniometer/theta'] = (
-                    logs['positioners/th'])
-            if 'sample' not in self.root['entry']:
-                self.root['entry/sample'] = NXsample()
-            self.root['entry/sample/name'] = self.sample
-            self.root['entry/sample/label'] = self.label
-            if 'sampleT' in logs['data']:
-                self.root['entry/sample/temperature'] = (
-                    logs['data/sampleT'].average())
-                self.root['entry/sample/temperature'].attrs['units'] = 'K'
-            if 'sample' not in self.entry:
-                self.entry.makelink(self.root['entry/sample'])
+    def get_source(self, logs=None):
+        source = NXsource()
+        source['name'] = self.source_name
+        source['type'] = self.source_type
+        source['probe'] = 'x-ray'
+        return source
 
-    def read_monitor(self, monitor=None):       
-        try:
-            if monitor is None:
-                if self.monitor is None:
-                    monitor = self.settings['nxreduce']['monitor']
-                else:
-                    monitor = self.monitor
-            if monitor in self.entry:
-                monitor_signal = self.entry[monitor].nxsignal
-            elif monitor in self.entry['logs/data']:
-                monitor_signal = self.entry[f'logs/data/{monitor}']
-            monitor_signal = monitor_signal.nxvalue[:self.reduce.nframes]
-            monitor_signal[0:2] = monitor_signal[2]
-            monitor_signal[-2:] = monitor_signal[-3]
-            return monitor_signal / self.reduce.norm
-        except Exception:
-            self.reduce.log(f"Cannot identify monitor {self.monitor}")
-            return np.ones(shape=(self.reduce.nframes), dtype=float)
+    def get_monitor(self, logs=None):
+        if logs is None or self.monitor not in logs['data']:
+            return None
+        frame_number = self.entry['data/frame_number']
+        frames = frame_number.size
+        data = logs[f'data/{self.monitor}'][:frames]
+        # Remove outliers at beginning and end of frames
+        data[0:2] = data[2]
+        data[-2:] = data[-3]
+        monitor = NXmonitor(NXfield(data, name=self.monitor), frame_number)
+        if 'data/frame_time' in self.entry:
+            monitor['frame_time'] = self.entry['data/frame_time']
+        return monitor
+
+    def get_goniometer(self, logs=None):
+        if logs is None:
+            return None
+        g = NXgoniometer()
+        if 'phi' in logs.get('data', {}):
+            phi_arr = logs['data/phi']
+            g['phi'] = NXfield(phi_arr[0])
+            g['phi'].attrs['step'] = phi_arr[1] - phi_arr[0]
+            g['phi'].attrs['end'] = phi_arr[-1]
+        if 'chi' in logs.get('positioners', {}):
+            g['chi'] = 90.0 - logs['positioners/chi']
+        if 'th' in logs.get('positioners', {}):
+            g['theta'] = logs['positioners/th']
+        return g if g.entries else None
+
+    def get_sample(self, logs=None):
+        sample = NXsample()
+        sample['name'] = self.sample
+        sample['label'] = self.label
+        if logs is not None and 'sampleT' in logs.get('data', {}):
+            sample['temperature'] = logs['data/sampleT'].average()
+            sample['temperature'].attrs['units'] = 'K'
+        return sample
+
+    def get_start_time(self, logs=None):
+        if logs is None or 'date' not in logs:
+            return None
+        return logs['date']
