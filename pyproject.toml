@@ -10,4 +10,4 @@ dependencies = [
 ]
 
 [project.entry-points."nxrefine.beamlines"]
-beamline = "qm2beamline:QM2BeamLine"
+beamline = "QM2BeamLine:QM2BeamLine"
