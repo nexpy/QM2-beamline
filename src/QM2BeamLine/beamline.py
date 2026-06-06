@@ -2,9 +2,9 @@ import re
 
 import fabio
 import numpy as np
-from nexusformat.nexus import (NeXusError, NXcollection, NXdata, NXfield,
-                               NXgoniometer, NXmonitor, NXsample, NXsource,
-                               nxopen)
+from nexusformat.nexus import (NeXusError, NXcollection, NXdata, NXentry,
+                               NXfield, NXgoniometer, NXlink, NXmonitor,
+                               NXsample, NXsource, nxopen)
 from nexusformat.nexus.tree import natural_sort
 from nxrefine.nxbeamline import NXBeamLine
 from nxrefine.nxutils import SpecParser
@@ -172,36 +172,30 @@ class QM2BeamLine(NXBeamLine):
                     self.read_images(files, image_shape))
 
     def get_logs(self):
-        spec_file = self.raw_directory.parent / self.sample
+        spec_file = self.raw_directory / self.sample
         if not spec_file.exists():
             self.reduce.log(f"'{spec_file}' does not exist")
             raise NeXusError('SPEC file not found')
         scan_number = self.entry['scan_number'].nxvalue
         logs = SpecParser(spec_file).read(scan_number).NXentry[0]
-        # NXcollection is the conventional class at
-        # entry/instrument/logs (NXsubentry connotes an alternative
-        # measurement interpretation, which these logs are not).
         logs.nxclass = NXcollection
-        # Sweep the pre-migration entry['logs'] path so old QM2
-        # wrappers don't carry duplicate data alongside the new
-        # entry['instrument/logs'].
         if 'logs' in self.entry:
             del self.entry['logs']
         return logs
 
-    def get_source(self, logs=None):
+    def get_source(self):
         source = NXsource()
         source['name'] = self.source_name
         source['type'] = self.source_type
         source['probe'] = 'x-ray'
         return source
 
-    def get_monitor(self, logs=None):
-        if logs is None or self.monitor not in logs['data']:
+    def get_monitor(self):
+        if self.logs is None or self.monitor not in self.logs['data']:
             return None
         frame_number = self.entry['data/frame_number']
         frames = frame_number.size
-        data = logs[f'data/{self.monitor}'][:frames]
+        data = self.logs[f'data/{self.monitor}'][:frames]
         # Remove outliers at beginning and end of frames
         data[0:2] = data[2]
         data[-2:] = data[-3]
@@ -210,31 +204,31 @@ class QM2BeamLine(NXBeamLine):
             monitor['frame_time'] = self.entry['data/frame_time']
         return monitor
 
-    def get_goniometer(self, logs=None):
-        if logs is None:
+    def get_goniometer(self):
+        if self.logs is None:
             return None
         g = NXgoniometer()
-        if 'phi' in logs.get('data', {}):
-            phi_arr = logs['data/phi']
+        if 'phi' in self.logs.get('data', {}):
+            phi_arr = self.logs['data/phi']
             g['phi'] = NXfield(phi_arr[0])
             g['phi'].attrs['step'] = phi_arr[1] - phi_arr[0]
             g['phi'].attrs['end'] = phi_arr[-1]
-        if 'chi' in logs.get('positioners', {}):
-            g['chi'] = 90.0 - logs['positioners/chi']
-        if 'th' in logs.get('positioners', {}):
-            g['theta'] = logs['positioners/th']
+        if 'chi' in self.logs.get('positioners', {}):
+            g['chi'] = 90.0 - self.logs['positioners/chi']
+        if 'th' in self.logs.get('positioners', {}):
+            g['theta'] = self.logs['positioners/th']
         return g if g.entries else None
 
-    def get_sample(self, logs=None):
+    def get_sample(self):
         sample = NXsample()
         sample['name'] = self.sample
         sample['label'] = self.label
-        if logs is not None and 'sampleT' in logs.get('data', {}):
-            sample['temperature'] = logs['data/sampleT'].average()
+        if self.logs is not None and 'sampleT' in self.logs.get('data', {}):
+            sample['temperature'] = self.logs['data/sampleT'].average()
             sample['temperature'].attrs['units'] = 'K'
         return sample
 
-    def get_start_time(self, logs=None):
-        if logs is None or 'date' not in logs:
+    def get_start_time(self):
+        if self.logs is None or 'date' not in self.logs:
             return None
-        return logs['date']
+        return self.logs['date']
